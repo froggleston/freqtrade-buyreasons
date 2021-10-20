@@ -8,6 +8,10 @@ Usage:
 
 buy_reasons.py -c <config.json> -s <strategy_name> -t <timerange> -g<[0,1,2,3,4]> [-l <path_to_data_dir>]
 
+Example:
+
+buy_reasons.py -c my_config.json -s DoNothingStrategy -t 20211001- -g0,1,2
+
 A script to parse freqtrade backtesting trades and display them with their buy_tag and sell_reason
 
 Author: froggleston [https://github.com/froggleston]
