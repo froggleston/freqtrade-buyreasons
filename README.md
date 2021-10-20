@@ -3,7 +3,7 @@ A script to parse and display buy_tag and sell_reason for freqtrade backtesting 
 
 ## Usage
 
-You need to backtest with the --export options enabled in freqtrade so that this script has the right data to work with:
+Copy the buy_reasons.py script into your freqtrade/scripts folder. You then need to backtest with the --export options enabled in freqtrade so that this script has the right data to work with:
 
 `freqtrade backtesting -c <config.json> --timeframe 5m --strategy <strategy_name> --timerange=<timerange> --export=trades --export-filename=user_data/backtest_results/<name>-<timerange>`
 
