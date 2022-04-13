@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
@@ -6,7 +6,7 @@ buy_reasons.py
 
 Usage:
 
-buy_reasons.py -c <config.json> -s <strategy_list> -t <timerange> -g<[0,1,2,3,4]> [-l <path_to_data_dir>] [--indicator_list<[rsi,mfi,close]>] [--buy_reason_list <[buy_tag_1,buy_tag_2]>] [--sell_reason_list <[stop_loss,trailing_stop_loss,roi]>]
+buy_reasons.py -c <config.json> -s <strategy_name> -t <timerange> -g<[0,1,2,3,4]> [-l <path_to_data_dir>]
 
 A script to parse freqtrade backtesting trades and display them with their buy_tag and sell_reason
 
@@ -30,14 +30,15 @@ from freqtrade.exceptions import ExchangeError, OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.resolvers import ExchangeResolver, StrategyResolver
 
-from joblib import Parallel, cpu_count, delayed, dump, load, wrap_non_picklable_objects
+from joblib import Parallel, delayed, dump, load, wrap_non_picklable_objects
 
 import numpy as np
 import pandas as pd
 
 import copy
 import threading
-import multiprocessing
+from multiprocessing import get_context, Pool, cpu_count
+import time
 
 from tabulate import tabulate
 import argparse
@@ -48,22 +49,58 @@ from functools import reduce
 logger = logging.getLogger(__name__)
 logger.setLevel("INFO")
 
+def load_candles(pairlist, timerange, data_location, timeframe="5m", data_format="json"):
+    all_candles=dict()
+    print(f'Loading all candle data...')
+    
+    for pair in pairlist:
+        if timerange is not None:
+            ptr = TimeRange.parse_timerange(timerange)
+            candles = load_pair_history(datadir=data_location,
+                                        timeframe=timeframe,
+                                        timerange=ptr,
+                                        pair=pair,
+                                        data_format = data_format,
+                                        )
+        else:
+            candles = load_pair_history(datadir=data_location,
+                                        timeframe=timeframe,
+                                        pair=pair,
+                                        data_format = data_format,
+                                        )
+        all_candles[pair] = candles
+    print("done", end="\r")
+    return all_candles
+
 def do_analysis(strategy, pair, candles, trades, verbose=False, rk_tags=False, alt_tag='buy'):
+    start_time = time.perf_counter()
     df = strategy.analyze_ticker(candles, {'pair': pair})
+    end_time = time.perf_counter()
+    
+    print(f"Analysis elapsed time: {(end_time - start_time)/60}")
+    
+    # if verbose:
+    print(f"Generated {df['buy'].sum()} buy / {df['sell'].sum()} sell signals")
 
-    if verbose:
-        print(f"Generated {df['buy'].sum()} buy / {df['sell'].sum()} sell signals")
+    #if (pair in ["BAND/USDT","BAT/USDT","ROSE/USDT","GRT/USDT","SNX/USDT","CELO/USDT"]):
+    #    print(pair, df.loc[df['buy'] == 1, ['buy_tag', 'msq_normabs']])
+        
     data = df.set_index('date', drop=False)
-
-    return do_trade_buys(pair, data, trades, rk_tags, alt_tag)
+    
+    start_time = time.perf_counter()
+    tb = do_trade_buys(pair, data, trades, rk_tags, alt_tag)
+    end_time = time.perf_counter()
+    
+    print(f"Trade buys elapsed time: {(end_time - start_time)/60}")
+    
+    return tb
     
 def do_trade_buys(pair, data, trades, rk_tags=False, alt_tag="buy"):
     trades_red = trades.loc[trades['pair'] == pair].copy()
-
+    
     trades_inds = pd.DataFrame()
     
     if trades_red.shape[0] > 0:
-        
         bg = r"^" + alt_tag
         sg = r"sell"
         
@@ -72,11 +109,13 @@ def do_trade_buys(pair, data, trades, rk_tags=False, alt_tag="buy"):
         if buyf.shape[0] > 0:
             for t, v in trades_red.open_date.items():
                 allinds = buyf.loc[(buyf['date'] < v)]
+                
                 trade_inds = allinds.iloc[[-1]]
                 
                 trades_red.loc[t, 'signal_date'] = trade_inds['date'].values[0]
                 
                 bt = allinds.iloc[-1].filter(regex=bg, axis=0)
+                
                 bt.dropna(inplace=True)
                 bt.drop(f"{alt_tag}", inplace=True)
                 
@@ -84,7 +123,6 @@ def do_trade_buys(pair, data, trades, rk_tags=False, alt_tag="buy"):
                     if rk_tags:
                         trades_red.loc[t, 'buy_reason'] = bt.index.values[0]
                     else:
-                        # print(trades_red.loc[t, 'buy_tag'])
                         trades_red.loc[t, 'buy_reason'] = trades_red.loc[t, 'buy_tag']
                 
                 trade_inds.index.rename('signal_date', inplace=True)
@@ -117,12 +155,30 @@ def do_trade_buys(pair, data, trades, rk_tags=False, alt_tag="buy"):
 
 def do_group_table_output(bigdf, glist):
     if "0" in glist:
-        new = bigdf.groupby(['buy_reason']).agg({'profit_abs': ['count', lambda x: sum(x > 0), lambda x: sum(x <= 0)]}).reset_index()
-        new.columns = ['buy_reason', 'total_num_buys', 'wins', 'losses']
-        new['wl_ratio_pct'] = (new['wins']/new['total_num_buys']*100)
-        sortcols = ['total_num_buys']
+        wins = bigdf.loc[bigdf['profit_abs'] >= 0].groupby(['buy_reason']).agg({'profit_abs': ['sum']})
+        wins.columns = ['profit_abs_wins']
+        loss = bigdf.loc[bigdf['profit_abs'] < 0].groupby(['buy_reason']).agg({'profit_abs': ['sum']})
+        loss.columns = ['profit_abs_loss']
         
-        print_table(new, sortcols)
+        new = bigdf.groupby(['buy_reason']).agg({'profit_abs': 
+                                                 ['count', 
+                                                  lambda x: sum(x > 0),
+                                                  lambda x: sum(x <= 0),]})
+        
+        new = pd.merge(new, wins, left_index=True, right_index=True)
+        new = pd.merge(new, loss, left_index=True, right_index=True)
+        
+        new['profit_tot'] = new['profit_abs_wins'] - abs(new['profit_abs_loss'])
+        
+        new['wl_ratio_pct'] = (new.iloc[:, 1]/new.iloc[:, 0]*100)
+        new['avg_win'] = (new['profit_abs_wins']/new.iloc[:, 1])
+        new['avg_loss'] = (new['profit_abs_loss']/new.iloc[:, 2])
+        
+        new.columns = ['total_num_buys', 'wins', 'losses', 'profit_abs_wins', 'profit_abs_loss', "profit_tot", "wl_ratio_pct", "avg_win", "avg_loss"]
+        
+        sortcols = ['total_num_buys']
+
+        print_table(new, sortcols, show_index=True)
     if "1" in glist:
         new = bigdf.groupby(['buy_reason']).agg({'profit_abs': ['count', 'sum', 'median', 'mean'], 'profit_ratio': ['sum', 'median', 'mean']}).reset_index()
         new.columns = ['buy_reason', 'num_buys', 'profit_abs_sum', 'profit_abs_median', 'profit_abs_mean', 'median_profit_pct', 'mean_profit_pct', 'total_profit_pct']
@@ -141,7 +197,7 @@ def do_group_table_output(bigdf, glist):
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
         new['total_profit_pct'] = new['total_profit_pct']*100
-
+        
         print_table(new, sortcols)
     if "3" in glist:
         new = bigdf.groupby(['pair', 'buy_reason']).agg({'profit_abs': ['count', 'sum', 'median', 'mean'], 'profit_ratio': ['sum', 'median', 'mean']}).reset_index()
@@ -161,13 +217,39 @@ def do_group_table_output(bigdf, glist):
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
         new['total_profit_pct'] = new['total_profit_pct']*100
-
+        
         print_table(new, sortcols)    
     
 def process_one(pair, stratnames, trade_dict, all_candles, ft_config, current_count, total_job_num, verbose=False, write_out=False):
     analysed_trades_dict = {}
     
+    time.sleep(3)
+    
     for sname in stratnames:
+        stake = "USDT"
+
+        loc_config = ft_config.copy()
+        
+        # Generate buy/sell signals using strategy
+        timeframe = "5m"
+        loc_config['timeframe'] = timeframe
+
+        timeframe_detail = "1m"
+        loc_config['timeframe_detail'] = timeframe_detail
+
+        data_location = Path('/mnt', 'm', 'freqtrade_data', 'binance_json', 'binance')
+        loc_config['datadir'] = data_location
+
+        loc_config['strategy'] = sname
+        ft_exchange = ExchangeResolver.load_exchange(loc_config['exchange']['name'], config=loc_config, validate=False)
+        ft_pairlists = PairListManager(ft_exchange, loc_config)
+        ft_dataprovider = DataProvider(loc_config, ft_exchange, ft_pairlists)
+
+        # Load strategy using values set above
+        strategy = StrategyResolver.load_strategy(loc_config)
+        strategy.dp = ft_dataprovider
+        
+        """
         loc_config = ft_config.copy()
         loc_config['strategy'] = sname
 
@@ -178,46 +260,50 @@ def process_one(pair, stratnames, trade_dict, all_candles, ft_config, current_co
         
         strategy = StrategyResolver.load_strategy(loc_config)
         strategy.dp = ft_dataprovider
-
+        """
+        
         analysed_trades_dict[sname] = {}
 
         try:
             print(f"Processing {sname} {pair} [{current_count}/{total_job_num}]")
+            if len(all_candles[pair]) > 0:
+                tb = do_analysis(strategy, pair, all_candles[pair], trade_dict[sname])
+                analysed_trades_dict[sname][f'{pair.split("/")[0]}'] = tb
+            
+    #            if verbose:
+    #                print(tabulate(tb[columns], headers = 'keys', tablefmt = 'psql'))
 
-            tb = do_analysis(strategy, pair, all_candles[pair], trade_dict[sname])
-
-            analysed_trades_dict[sname][f'{pair.split("/")[0]}'] = tb
-
-            if verbose:
-                print(tabulate(tb[columns], headers = 'keys', tablefmt = 'psql'))
-
-            if write_out:
-                tb.to_csv(f'{sname}_{pair.split("/")[0]}_trades.csv')
+                if write_out:
+                    tb.to_csv(f'{sname}_{pair.split("/")[0]}_trades.csv')
         except Exception as e:
             # print("Something got zucked: No trades with this pair or you don't have buy_tags in your dataframe:", e)
             pass
     return pair, analysed_trades_dict
 
-def process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=True):
+def process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=True, verbose=False):
     buy_reason_jobs = []
     
     total_job_num = len(pairlist) * len(stratnames)
     
     current_count = 1
     for pair in pairlist:
-        buy_reason_jobs.append((pair, stratnames, trade_dict, all_candles, ft_config, current_count, total_job_num))
+        buy_reason_jobs.append((pair, stratnames, trade_dict, all_candles, ft_config, current_count, total_job_num, verbose))
         current_count += 1
     
     if parallel:
         i = 0
         results = []
-        while i < len(buy_reason_jobs):
-            job_split = int(multiprocessing.cpu_count() * 0.5)
+        
+        job_split = int(cpu_count() * 0.5)
+        print(f"Running {len(buy_reason_jobs)}/{job_split} concurrent jobs")
+        
+        while i < len(buy_reason_jobs):            
             if job_split > 1:
                 tasks = buy_reason_jobs[i:i+job_split]
             else:
                 tasks = buy_reason_jobs
-            with multiprocessing.Pool(max(job_split, 1)) as pool:
+            #with get_context("spawn").Pool(max(job_split, 1)) as pool:
+            with Pool(max(job_split, 1)) as pool:
                 results.extend([job.get() for job in [pool.apply_async(process_one, p) for p in tasks]])
                 pool.close()
                 pool.join()
@@ -235,14 +321,14 @@ def main():
     parser.add_argument("--indicator_list", nargs='?', help="Comma separated list of indicators to analyse")
     parser.add_argument("--buy_reason_list", nargs='?', help="Comma separated list of buy signals to analyse. Default: all") 
     parser.add_argument("--sell_reason_list", nargs='?', help="Comma separated list of sell signals to analyse. Default: 'stop_loss,trailing_stop_loss'")
-    parser.add_argument("-p", "--pairlist", nargs='?', help="pairlist as 'BTC/USDT,FOO/USDT,BAR/USDT'. Default: all pairs in backtest")
-    parser.add_argument("-n", "--no-parallel", action="store_true", help="don't parallelise, run in single thread. Default: False")
+    parser.add_argument("-p", "--pairlist", nargs='?', help="pairlist as 'BTC/USDT,FOO/USDT,BAR/USDT'")
     parser.add_argument("-u", "--use_trades_db", action="store_true", help="use dry/live trade DB specified in config instead of backtest results DB. Default: False")
     parser.add_argument("-w", "--write_out", help="write an output CSV per pair", action="store_true")
     parser.add_argument("-g", "--group", nargs='?', help="grouping output - 0: simple wins/losses by buy reason, 1: by buy_reason, 2: by buy_reason and sell_reason, 3: by pair and buy_reason, 4: by pair, buy_ and sell_reason (this can get quite large)")
     parser.add_argument("-o", "--outfile", help="write all trades summary table output", type=argparse.FileType('w'))
     parser.add_argument("-d", "--data_format", nargs='?', choices=["json", "hdf5"], help="specify the jsons or hdf5 datas. default is json")
     parser.add_argument("-l", "--data_dir_location", nargs='?', help="specify the path to the downloaded OHLCV jsons or hdf5 datas. default is user_data/data/<exchange_name>")
+    parser.add_argument("-i", "--indicators", nargs='?', help="Indicator values to output, as a comma separated list, e.g. -i rsi,adx,macd")
     parser.add_argument("-x", "--cancels", action="store_true", help="Output buy cancel reasons. Default: False")    
     parser.add_argument("-r", "--rk_tags", action="store_true", help="Use the ConditionLabeler tags instead of the newer buy_tag tagging feature in FT. Default: False")
     parser.add_argument("-a", "--alternative_tag_name", nargs='?', help="Supply a different buy_tag name to use instead of 'buy', e.g. 'prebuy'. This is for more complex buy_tag use in strategies.")
@@ -269,11 +355,7 @@ def main():
 
     if args.group is not None and args.indicators is not None:
         print("WARNING: cannot use indicator output with grouping. Ignoring indicator output")
-
-    parallel = True
-    if args.no_parallel is not None:
-	parallel = False
-
+    
     if args.pairlist is None:
         pairlist = ft_pairlists.whitelist
     else:
@@ -316,25 +398,8 @@ def main():
             trades = load_backtest_data(backtest_dir, sname)
             trade_dict[sname] = trades
 
-    all_candles=dict()
     print(f'Loading all candle data...')
-    
-    for pair in pairlist:
-        if args.timerange is not None:
-            ptr = TimeRange.parse_timerange(args.timerange)
-            candles = load_pair_history(datadir=data_location,
-                                        timeframe=timeframe,
-                                        timerange=ptr,
-                                        pair=pair,
-                                        data_format = data_format,
-                                        )
-        else:
-            candles = load_pair_history(datadir=data_location,
-                                        timeframe=timeframe,
-                                        pair=pair,
-                                        data_format = data_format,
-                                        )
-        all_candles[pair] = candles
+    all_candles = load_candles(pairlist, args.timerange, data_location, timeframe, data_format)
 
     columns = ['pair', 'open_date', 'close_date', 'profit_abs', 'buy_reason', 'sell_reason']
     
@@ -343,7 +408,13 @@ def main():
     
     analysed_trades_dict = {}
 
-    results = process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=parallel)
+    results = process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=True)
+    
+    print_results(results, analysed_trades_dict, stratnames, args.outfile, args.group, args.buy_reason_list, args.sell_reason_list, args.indicator_list, args.cancels)
+    
+def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_list="all", sell_reason_list="all", indicator_list=None, cancels=False, columns=['pair', 'open_date', 'close_date', 'profit_abs', 'buy_reason', 'sell_reason'], start_date=None, end_date=None):
+    
+    analysed_trades_dict = {}
     
     for r in results:
         pair, analysed_trades = r
@@ -362,34 +433,46 @@ def main():
         for tpair, trades in analysed_trades_dict[sname].items():
             bigdf = bigdf.append(trades, ignore_index=True)
 
-        if args.outfile:
-            args.outfile.write(bigdf.to_csv())
+        if outfile:
+            outfile.write(bigdf.to_csv())
         else:
             bigdf.to_csv(f'{sname}_all_trade_buys.csv')
 
+        if (start_date is not None):
+            bigdf = bigdf.loc[(bigdf['date'] > start_date)]
+            
+        if (end_date is not None):
+            bigdf = bigdf.loc[(bigdf['date'] < end_date)]
+            
         if bigdf.shape[0] > 0 and ('buy_reason' in bigdf.columns):
-            if args.group is not None:
-                glist = args.group.split(",")
+            if group is not None:
+                glist = group.split(",")
                 do_group_table_output(bigdf, glist)
 
-            if args.buy_reason_list is not None and not args.buy_reason_list == "all":
-                buy_reason_list = args.buy_reason_list.split(",")
+            if buy_reason_list is not None and not buy_reason_list == "all":
+                buy_reason_list = buy_reason_list.split(",")
                 bigdf = bigdf.loc[(bigdf['buy_reason'].isin(buy_reason_list))]
 
-            if args.sell_reason_list is not None and not args.sell_reason_list == "all":
-                sell_reason_list = args.sell_reason_list.split(",")
+            if sell_reason_list is not None and not sell_reason_list == "all":
+                sell_reason_list = sell_reason_list.split(",")
                 bigdf = bigdf.loc[(bigdf['sell_reason'].isin(sell_reason_list))]
+            #else:
+            #    bigdf = bigdf.loc[(bigdf['sell_reason'] == "stop_loss") | (bigdf['sell_reason'] == "trailing_stop_loss")]
 
-            if args.indicator_list is not None:
-                if args.indicator_list == "all":
+            if indicator_list is not None:
+                if indicator_list == "all":
                     print(bigdf)
                 else:
-                    ilist = ["pair", "buy_reason", "sell_reason"] + args.indicator_list.split(",")
+                    available_inds = []
+                    for ind in indicator_list.split(","):
+                        if ind in bigdf:
+                            available_inds.append(ind)
+                    ilist = ["pair", "buy_reason", "sell_reason"] + available_inds
                     print(tabulate(bigdf[ilist].sort_values(['sell_reason']), headers = 'keys', tablefmt = 'psql', showindex=False))
             else:
                 print(tabulate(bigdf[columns].sort_values(['pair']), headers = 'keys', tablefmt = 'psql', showindex=False))
 
-            if args.cancels:
+            if cancels:
                 if bigdf.shape[0] > 0 and ('cancel_reason' in bigdf.columns):
 
                     cs = bigdf.groupby(['buy_reason']).agg({'profit_abs': ['count'], 'cancel_reason': ['count']}).reset_index()
@@ -402,7 +485,7 @@ def main():
         else:
             print("\_ No trades to show")
             
-def print_table(df, sortcols=None):
+def print_table(df, sortcols=None, show_index=False):
     if (sortcols is not None):
         data = df.sort_values(sortcols)
     else:
@@ -413,7 +496,7 @@ def print_table(df, sortcols=None):
             data,
             headers = 'keys',
             tablefmt = 'psql',
-            showindex=False
+            showindex=show_index
         )
     )
     
