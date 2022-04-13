@@ -236,12 +236,12 @@ def main():
     parser.add_argument("--buy_reason_list", nargs='?', help="Comma separated list of buy signals to analyse. Default: all") 
     parser.add_argument("--sell_reason_list", nargs='?', help="Comma separated list of sell signals to analyse. Default: 'stop_loss,trailing_stop_loss'")
     parser.add_argument("-p", "--pairlist", nargs='?', help="pairlist as 'BTC/USDT,FOO/USDT,BAR/USDT'. Default: all pairs in backtest")
-    parser.add_argument("-n", "--no-parallel", action="store_true", help="don't parallelise, run in single thread. Default: False")
+    parser.add_argument("-n", "--no-parallel", action="store_true", default=False, help="don't parallelise, run in single thread. Default: False")
     parser.add_argument("-u", "--use_trades_db", action="store_true", help="use dry/live trade DB specified in config instead of backtest results DB. Default: False")
     parser.add_argument("-w", "--write_out", help="write an output CSV per pair", action="store_true")
     parser.add_argument("-g", "--group", nargs='?', help="grouping output - 0: simple wins/losses by buy reason, 1: by buy_reason, 2: by buy_reason and sell_reason, 3: by pair and buy_reason, 4: by pair, buy_ and sell_reason (this can get quite large)")
     parser.add_argument("-o", "--outfile", help="write all trades summary table output", type=argparse.FileType('w'))
-    parser.add_argument("-d", "--data_format", nargs='?', choices=["json", "hdf5"], help="specify the jsons or hdf5 datas. default is json")
+    parser.add_argument("--timeframe", default='5m', help="specify the jsons or hdf5 datas. default is json")
     parser.add_argument("-l", "--data_dir_location", nargs='?', help="specify the path to the downloaded OHLCV jsons or hdf5 datas. default is user_data/data/<exchange_name>")
     parser.add_argument("-x", "--cancels", action="store_true", help="Output buy cancel reasons. Default: False")    
     parser.add_argument("-r", "--rk_tags", action="store_true", help="Use the ConditionLabeler tags instead of the newer buy_tag tagging feature in FT. Default: False")
@@ -270,26 +270,18 @@ def main():
     if args.group is not None and args.indicators is not None:
         print("WARNING: cannot use indicator output with grouping. Ignoring indicator output")
 
-    parallel = True
-    if args.no_parallel is not None:
-	parallel = False
-
     if args.pairlist is None:
         pairlist = ft_pairlists.whitelist
     else:
         pairlist = args.pairlist.split(",")
-    
-    if args.data_format is None:
-        data_format = "json"
-    else:
-        data_format = args.data_format
+
+    data_format = ft_config.get('dataformat_ohlcv', 'json')
 
     if args.alternative_tag_name is None:
         alternative_tag_name = "buy"
     else:
         alternative_tag_name = args.alternative_tag_name
-        
-    timeframe = "5m"
+
     backtest = False
     
     stratnames = []
@@ -318,19 +310,22 @@ def main():
 
     all_candles=dict()
     print(f'Loading all candle data...')
-    
+
+    if len(pairlist) == 0:
+        pairlist = trades['pair'].unique().tolist()
+
     for pair in pairlist:
         if args.timerange is not None:
             ptr = TimeRange.parse_timerange(args.timerange)
             candles = load_pair_history(datadir=data_location,
-                                        timeframe=timeframe,
+                                        timeframe=args.timeframe,
                                         timerange=ptr,
                                         pair=pair,
                                         data_format = data_format,
                                         )
         else:
             candles = load_pair_history(datadir=data_location,
-                                        timeframe=timeframe,
+                                        timeframe=args.timeframe,
                                         pair=pair,
                                         data_format = data_format,
                                         )
@@ -343,7 +338,7 @@ def main():
     
     analysed_trades_dict = {}
 
-    results = process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=parallel)
+    results = process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parallel=not args.no_parallel)
     
     for r in results:
         pair, analysed_trades = r
