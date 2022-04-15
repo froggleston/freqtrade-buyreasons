@@ -113,7 +113,6 @@ def do_trade_buys(pair, data, trades, rk_tags=False, alt_tag="buy", pickled_sign
                 if pickled_signal_candles is not None:
                     trade_inds = allinds.iloc[[-1]]
                     bt = trade_inds
-                    print(trade_inds)
                     trades_red.loc[t, 'signal_date'] = trade_inds['date'].values[0]
                 else:
                     trade_inds = allinds.iloc[[-1]]
