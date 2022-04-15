@@ -74,13 +74,15 @@ def load_candles(pairlist, timerange, data_location, timeframe="5m", data_format
 def do_analysis(strategy, pair, candles, trades, verbose=False, rk_tags=False, alt_tag='buy', pickled_signal_candles=None):
     if pickled_signal_candles is not None:
         df = pickled_signal_candles[strategy.get_strategy_name()][pair]
-        print(f"Generated {df.shape[0]} buy / sell signals")
+        if verbose:
+            print(f"Generated {df.shape[0]} buy / sell signals")
     else:
         start_time = time.perf_counter()
         df = strategy.analyze_ticker(candles, {'pair': pair})
         end_time = time.perf_counter()
-        print(f"Analysis elapsed time: {(end_time - start_time)/60}")
-        print(f"Generated {df['buy'].sum()} buy / {df['sell'].sum()} sell signals")
+        if verbose:
+            print(f"Analysis elapsed time: {(end_time - start_time)/60}")
+            print(f"Generated {df['buy'].sum()} buy / {df['sell'].sum()} sell signals")
 
     data = df.set_index('date', drop=False)
     
@@ -88,7 +90,8 @@ def do_analysis(strategy, pair, candles, trades, verbose=False, rk_tags=False, a
     tb = do_trade_buys(pair, data, trades, rk_tags, alt_tag, pickled_signal_candles)
     end_time = time.perf_counter()
     
-    print(f"Trade buys elapsed time: {(end_time - start_time)/60}")
+    if verbose:
+        print(f"Trade buys elapsed time: {(end_time - start_time)/60}")
     
     return tb
     
@@ -241,7 +244,8 @@ def process_one(pair, stratnames, trade_dict, all_candles, ft_config, current_co
         analysed_trades_dict[sname] = {}
 
         try:
-            print(f"Processing {sname} {pair} [{current_count}/{total_job_num}]")
+            if verbose:
+                print(f"Processing {sname} {pair} [{current_count}/{total_job_num}]")
             if len(all_candles[pair]) > 0:
                 tb = do_analysis(strategy, pair, all_candles, trade_dict[sname], pickled_signal_candles=pickled_signal_candles)
                 analysed_trades_dict[sname][f'{pair.split("/")[0]}'] = tb
@@ -271,20 +275,20 @@ def process_all(pairlist, stratnames, trade_dict, all_candles, ft_config, parall
         results = []
         
         job_split = int(cpu_count() * 0.5)
-        print(f"Running {len(buy_reason_jobs)}/{job_split} concurrent jobs")
+        print(f"Running {len(buy_reason_jobs)}/{job_split} concurrent jobs...")
         
         while i < len(buy_reason_jobs):            
             if job_split > 1:
                 tasks = buy_reason_jobs[i:i+job_split]
             else:
                 tasks = buy_reason_jobs
-            #with get_context("spawn").Pool(max(job_split, 1)) as pool:
             with Pool(max(job_split, 1)) as pool:
                 results.extend([job.get() for job in [pool.apply_async(process_one, p) for p in tasks]])
                 pool.close()
                 pool.join()
             i += len(tasks)
     else:
+        print(f"Processing {len(buy_reason_jobs)} pairs...")
         results = [process_one(*p) for p in buy_reason_jobs]
     return results
     
@@ -404,7 +408,7 @@ def main():
             pickled_signal_candles = pickle.load(scp)
             print("Loaded signal candles:", args.signal_candles_pickle)
         else:
-            scpf = Path(backtest_dir, get_latest_backtest_filename(backtest_dir)[:-20] + "_signals.pkl")
+            scpf = Path(backtest_dir, os.path.splitext(get_latest_backtest_filename(backtest_dir))[0] + "_signals.pkl")
             scp = open(scpf, "rb")
             pickled_signal_candles = pickle.load(scp)
             print("Loaded signal candles:", str(scpf))
