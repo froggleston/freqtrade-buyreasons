@@ -20,7 +20,7 @@ Donations:
 import argparse
 import logging
 import os
-import pickle
+import joblib
 import time
 from pathlib import Path
 
@@ -69,7 +69,7 @@ def do_analysis(strategy, pair, candles, trades, verbose=False, rk_tags=False, a
     if pickled_signal_candles is not None:
         df = pickled_signal_candles[strategy.get_strategy_name()][pair]
         if verbose:
-            print(f"Generated {df.shape[0]} buy / sell signals")
+            print(f"Generated {df.shape[0]} enter / exit signals")
     else:
         start_time = time.perf_counter()
         df = strategy.analyze_ticker(candles, {'pair': pair})
@@ -81,8 +81,9 @@ def do_analysis(strategy, pair, candles, trades, verbose=False, rk_tags=False, a
     data = df.set_index('date', drop=False)
 
     start_time = time.perf_counter()
-    tb = do_trade_buys(pair, data, trades, rk_tags, alt_tag, pickled_signal_candles,
-                       strategy_version)
+    tb = do_trade_buys(pair, data, trades, alt_tag=alt_tag,
+                       pickled_signal_candles=pickled_signal_candles,
+                       strategy_version=strategy_version)
     end_time = time.perf_counter()
 
     if verbose:
@@ -100,7 +101,7 @@ def do_trade_buys(pair, data, trades, alt_tag=None, pickled_signal_candles=None,
     if trades_red.shape[0] > 0:
         if alt_tag is None:
             if strategy_version == 3:
-                alt_tag = "entry"
+                alt_tag = "enter"
             else:
                 alt_tag = "buy"
 
@@ -114,23 +115,23 @@ def do_trade_buys(pair, data, trades, alt_tag=None, pickled_signal_candles=None,
         if buyf.shape[0] > 0:
             for t, v in trades_red.open_date.items():
                 allinds = buyf.loc[(buyf['date'] < v)]
-
+                tmp_inds = pd.DataFrame()
                 if pickled_signal_candles is not None:
-                    trade_inds = allinds.iloc[[-1]]
-                    bt = trade_inds
-                    trades_red.loc[t, 'signal_date'] = trade_inds['date'].values[0]
+                    tmp_inds = allinds.iloc[[-1]]
+                    # bt = tmp_inds
+                    trades_red.loc[t, 'signal_date'] = tmp_inds['date'].values[0]
                 else:
-                    trade_inds = allinds.iloc[[-1]]
-                    trades_red.loc[t, 'signal_date'] = trade_inds['date'].values[0]
-                    bt = allinds.iloc[-1].filter(regex=bg, axis=0)
-                    bt.dropna(inplace=True)
-                    bt.drop(f"{alt_tag}", inplace=True)
+                    tmp_inds = allinds.iloc[[-1]]
+                    trades_red.loc[t, 'signal_date'] = tmp_inds['date'].values[0]
+                    # bt = allinds.iloc[-1].filter(regex=bg, axis=0)
+                    # bt.dropna(inplace=True)
+                    # bt.drop(f"{alt_tag}", inplace=True)
 
-                if (bt.shape[0] > 0):
-                    trades_red.loc[t, 'buy_reason'] = trades_red.loc[t, 'buy_tag']
+                if (tmp_inds.shape[0] > 0):
+                    trades_red.loc[t, 'enter_reason'] = trades_red.loc[t, f'{alt_tag}_tag']
 
-                trade_inds.index.rename('signal_date', inplace=True)
-                trades_inds = trades_inds.append(trade_inds)
+                tmp_inds.index.rename('signal_date', inplace=True)
+                trades_inds = pd.concat([trades_inds, tmp_inds])
 
         cancelf = data[data.filter(regex=r'^cancel', axis=1).values == 1]
         if cancelf.shape[0] > 0:
@@ -157,16 +158,16 @@ def do_trade_buys(pair, data, trades, alt_tag=None, pickled_signal_candles=None,
 def do_group_table_output(bigdf, glist):
     if "0" in glist:
         wins = bigdf.loc[bigdf['profit_abs'] >= 0] \
-                    .groupby(['buy_reason']) \
+                    .groupby(['enter_reason']) \
                     .agg({'profit_abs': ['sum']})
 
         wins.columns = ['profit_abs_wins']
         loss = bigdf.loc[bigdf['profit_abs'] < 0] \
-                    .groupby(['buy_reason']) \
+                    .groupby(['enter_reason']) \
                     .agg({'profit_abs': ['sum']})
         loss.columns = ['profit_abs_loss']
 
-        new = bigdf.groupby(['buy_reason']).agg({'profit_abs':
+        new = bigdf.groupby(['enter_reason']).agg({'profit_abs':
                                                  ['count',
                                                   lambda x: sum(x > 0),
                                                   lambda x: sum(x <= 0), ]})
@@ -187,14 +188,14 @@ def do_group_table_output(bigdf, glist):
 
         print_table(new, sortcols, show_index=True)
     if "1" in glist:
-        new = bigdf.groupby(['buy_reason']) \
+        new = bigdf.groupby(['enter_reason']) \
                    .agg({'profit_abs': ['count', 'sum', 'median', 'mean'],
                          'profit_ratio': ['sum', 'median', 'mean']}) \
                    .reset_index()
-        new.columns = ['buy_reason', 'num_buys', 'profit_abs_sum', 'profit_abs_median',
+        new.columns = ['enter_reason', 'num_buys', 'profit_abs_sum', 'profit_abs_median',
                        'profit_abs_mean', 'median_profit_pct', 'mean_profit_pct',
                        'total_profit_pct']
-        sortcols = ['profit_abs_sum', 'buy_reason']
+        sortcols = ['profit_abs_sum', 'enter_reason']
 
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
@@ -202,14 +203,14 @@ def do_group_table_output(bigdf, glist):
 
         print_table(new, sortcols)
     if "2" in glist:
-        new = bigdf.groupby(['buy_reason', 'sell_reason']) \
+        new = bigdf.groupby(['enter_reason', 'exit_reason']) \
                    .agg({'profit_abs': ['count', 'sum', 'median', 'mean'],
                          'profit_ratio': ['sum', 'median', 'mean']}) \
                    .reset_index()
-        new.columns = ['buy_reason', 'sell_reason', 'num_buys', 'profit_abs_sum',
+        new.columns = ['enter_reason', 'exit_reason', 'num_buys', 'profit_abs_sum',
                        'profit_abs_median', 'profit_abs_mean', 'median_profit_pct',
                        'mean_profit_pct', 'total_profit_pct']
-        sortcols = ['profit_abs_sum', 'buy_reason']
+        sortcols = ['profit_abs_sum', 'enter_reason']
 
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
@@ -217,14 +218,14 @@ def do_group_table_output(bigdf, glist):
 
         print_table(new, sortcols)
     if "3" in glist:
-        new = bigdf.groupby(['pair', 'buy_reason']) \
+        new = bigdf.groupby(['pair', 'enter_reason']) \
                    .agg({'profit_abs': ['count', 'sum', 'median', 'mean'],
                         'profit_ratio': ['sum', 'median', 'mean']}) \
                    .reset_index()
-        new.columns = ['pair', 'buy_reason', 'num_buys', 'profit_abs_sum',
+        new.columns = ['pair', 'enter_reason', 'num_buys', 'profit_abs_sum',
                        'profit_abs_median', 'profit_abs_mean', 'median_profit_pct',
                        'mean_profit_pct', 'total_profit_pct']
-        sortcols = ['profit_abs_sum', 'buy_reason']
+        sortcols = ['profit_abs_sum', 'enter_reason']
 
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
@@ -232,14 +233,14 @@ def do_group_table_output(bigdf, glist):
 
         print_table(new, sortcols)
     if "4" in glist:
-        new = bigdf.groupby(['pair', 'buy_reason', 'sell_reason']) \
+        new = bigdf.groupby(['pair', 'enter_reason', 'exit_reason']) \
                    .agg({'profit_abs': ['count', 'sum', 'median', 'mean'],
                          'profit_ratio': ['sum', 'median', 'mean']}) \
                    .reset_index()
-        new.columns = ['pair', 'buy_reason', 'sell_reason', 'num_buys', 'profit_abs_sum',
+        new.columns = ['pair', 'enter_reason', 'exit_reason', 'num_buys', 'profit_abs_sum',
                        'profit_abs_median', 'profit_abs_mean', 'median_profit_pct',
                        'mean_profit_pct', 'total_profit_pct']
-        sortcols = ['profit_abs_sum', 'buy_reason']
+        sortcols = ['profit_abs_sum', 'enter_reason']
 
         new['median_profit_pct'] = new['median_profit_pct']*100
         new['mean_profit_pct'] = new['mean_profit_pct']*100
@@ -341,10 +342,10 @@ def main():
                         "by commas")
     parser.add_argument("--indicator_list", nargs='?',
                         help="Comma separated list of indicators to analyse")
-    parser.add_argument("--buy_reason_list", nargs='?',
-                        help="Comma separated list of buy signals to analyse. Default: all")
-    parser.add_argument("--sell_reason_list", nargs='?',
-                        help="Comma separated list of sell signals to analyse. "
+    parser.add_argument("--enter_reason_list", nargs='?',
+                        help="Comma separated list of entry signals to analyse. Default: all")
+    parser.add_argument("--exit_reason_list", nargs='?',
+                        help="Comma separated list of exit signals to analyse. "
                         "Default: 'stop_loss,trailing_stop_loss'")
     parser.add_argument("-p", "--pairlist", nargs='?',
                         help="pairlist as 'BTC/USDT,FOO/USDT,BAR/USDT'")
@@ -356,10 +357,10 @@ def main():
     parser.add_argument("-g", "--group", nargs='?',
                         help="grouping output - "
                         "0: simple wins/losses by buy reason, "
-                        "1: by buy_reason, "
-                        "2: by buy_reason and sell_reason, "
-                        "3: by pair and buy_reason, "
-                        "4: by pair, buy_ and sell_reason (this can get quite large)")
+                        "1: by enter_reason, "
+                        "2: by enter_reason and exit_reason, "
+                        "3: by pair and enter_reason, "
+                        "4: by pair, enter_ and exit_reason (this can get quite large)")
     parser.add_argument("-o", "--outfile",
                         help="write all trades summary table output",
                         type=argparse.FileType('w'))
@@ -377,8 +378,8 @@ def main():
     parser.add_argument("-x", "--cancels", action="store_true",
                         help="Output buy cancel reasons. Default: False")
     parser.add_argument("-a", "--alternative_tag_name", nargs='?',
-                        help="Supply a different buy_tag name to use instead of 'buy', "
-                        "e.g. 'prebuy'. This is for more complex buy_tag use in strategies.")
+                        help="Supply a different enter_tag name to use instead of 'enter', "
+                        "e.g. 'prebuy'. This is for more complex enter_tag use in strategies.")
     parser.add_argument("-m", "--multiprocessing", action="store_true",
                         help="Use parallel processing. Default: False")
     parser.add_argument("-v", "--verbose", help="verbose", action="store_true")
@@ -456,37 +457,32 @@ def main():
 
     all_candles = load_candles(pairlist, args.timerange, data_location, timeframe, data_format)
 
-    enable_backtest_signal_candle_export = False
-    if "enable_backtest_signal_candle_export" in ft_config:
-        enable_backtest_signal_candle_export = ft_config["enable_backtest_signal_candle_export"]
-
-    if enable_backtest_signal_candle_export:
-        pickled_signal_candles = None
-        if args.signal_candles_pickle is not None:
-            scp = open(args.signal_candles_pickle, "rb")
-            pickled_signal_candles = pickle.load(scp)
-            print("Loaded signal candles:", args.signal_candles_pickle)
-        else:
-            scpf = Path(backtest_dir,
-                        os.path.splitext(
-                            get_latest_backtest_filename(backtest_dir))[0] + "_signals.pkl"
-                        )
-            scp = open(scpf, "rb")
-            pickled_signal_candles = pickle.load(scp)
-            print("Loaded signal candles:", str(scpf))
+    pickled_signal_candles = None
+    if args.signal_candles_pickle is not None:
+        scp = open(args.signal_candles_pickle, "rb")
+        pickled_signal_candles = joblib.load(scp)
+        print("Loaded signal candles:", args.signal_candles_pickle)
+    else:
+        scpf = Path(backtest_dir,
+                    os.path.splitext(
+                        get_latest_backtest_filename(backtest_dir))[0] + "_signals.pkl"
+                    )
+        scp = open(scpf, "rb")
+        pickled_signal_candles = joblib.load(scp)
+        print("Loaded signal candles:", str(scpf))
 
     results = process_all(pairlist, stratnames, trade_dict, all_candles, ft_config,
                           parallel=parallel, pickled_signal_candles=pickled_signal_candles)
-    print_results(results, stratnames, args.outfile, args.group, args.buy_reason_list,
-                  args.sell_reason_list, args.indicator_list, args.cancels)
+    print_results(results, stratnames, args.outfile, args.group, args.enter_reason_list,
+                  args.exit_reason_list, args.indicator_list, args.cancels)
 
 
-def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_list="all",
-                  sell_reason_list="all", indicator_list=None, cancels=False,
+def print_results(results, stratnames, outfile=None, group="0,1,2", enter_reason_list="all",
+                  exit_reason_list="all", indicator_list=None, cancels=False,
                   columns=None, start_date=None, end_date=None):
 
     if columns is None:
-        columns = ['pair', 'open_date', 'close_date', 'profit_abs', 'buy_reason', 'sell_reason']
+        columns = ['pair', 'open_date', 'close_date', 'profit_abs', 'enter_reason', 'exit_reason']
 
     analysed_trades_dict = {}
 
@@ -505,7 +501,7 @@ def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_l
 
         print(f"{sname}")
         for tpair, trades in analysed_trades_dict[sname].items():
-            bigdf = bigdf.append(trades, ignore_index=True)
+            bigdf = pd.concat([bigdf, trades], ignore_index=True)
 
         if outfile:
             outfile.write(bigdf.to_csv())
@@ -518,18 +514,18 @@ def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_l
         if (end_date is not None):
             bigdf = bigdf.loc[(bigdf['date'] < end_date)]
 
-        if bigdf.shape[0] > 0 and ('buy_reason' in bigdf.columns):
+        if bigdf.shape[0] > 0 and ('enter_reason' in bigdf.columns):
             if group is not None:
                 glist = group.split(",")
                 do_group_table_output(bigdf, glist)
 
-            if buy_reason_list is not None and not buy_reason_list == "all":
-                buy_reason_list = buy_reason_list.split(",")
-                bigdf = bigdf.loc[(bigdf['buy_reason'].isin(buy_reason_list))]
+            if enter_reason_list is not None and not enter_reason_list == "all":
+                enter_reason_list = enter_reason_list.split(",")
+                bigdf = bigdf.loc[(bigdf['enter_reason'].isin(enter_reason_list))]
 
-            if sell_reason_list is not None and not sell_reason_list == "all":
-                sell_reason_list = sell_reason_list.split(",")
-                bigdf = bigdf.loc[(bigdf['sell_reason'].isin(sell_reason_list))]
+            if exit_reason_list is not None and not exit_reason_list == "all":
+                exit_reason_list = exit_reason_list.split(",")
+                bigdf = bigdf.loc[(bigdf['exit_reason'].isin(exit_reason_list))]
 
             if indicator_list is not None:
                 if indicator_list == "all":
@@ -539,8 +535,8 @@ def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_l
                     for ind in indicator_list.split(","):
                         if ind in bigdf:
                             available_inds.append(ind)
-                    ilist = ["pair", "buy_reason", "sell_reason"] + available_inds
-                    print(tabulate(bigdf[ilist].sort_values(['sell_reason']),
+                    ilist = ["pair", "enter_reason", "exit_reason"] + available_inds
+                    print(tabulate(bigdf[ilist].sort_values(['exit_reason']),
                           headers='keys', tablefmt='psql', showindex=False))
             else:
                 print(tabulate(bigdf[columns].sort_values(['pair']),
@@ -549,10 +545,10 @@ def print_results(results, stratnames, outfile=None, group="0,1,2", buy_reason_l
             if cancels:
                 if bigdf.shape[0] > 0 and ('cancel_reason' in bigdf.columns):
 
-                    cs = bigdf.groupby(['buy_reason']) \
+                    cs = bigdf.groupby(['enter_reason']) \
                               .agg({'profit_abs': ['count'], 'cancel_reason': ['count']}) \
                               .reset_index()
-                    cs.columns = ['buy_reason', 'num_buys', 'num_cancels']
+                    cs.columns = ['enter_reason', 'num_buys', 'num_cancels']
                     cs['percent_cancelled'] = (cs['num_cancels']/cs['num_buys']*100)
 
                     sortcols = ['num_cancels']
