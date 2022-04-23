@@ -7,9 +7,9 @@ You will end up with tables that look like the following, with various group opt
 
 ## Usage
 
-Copy the buy_reasons.py script into your freqtrade/scripts folder. You then need to backtest with the --export options enabled in freqtrade so that this script has the right data to work with:
+Copy the buy_reasons.py script into your freqtrade/scripts folder. You then need to backtest with the --export option set to `signals` in freqtrade so that this script has the right data to work with:
 
-`freqtrade backtesting -c <config.json> --timeframe 5m --strategy <strategy_name> --timerange=<timerange> --export=trades --export-filename=user_data/backtest_results/<name>-<timerange>`
+`freqtrade backtesting -c <config.json> --timeframe 5m --strategy <strategy_name> --timerange=<timerange> --export=signals --cache none`
 
 Then you can run:
 
@@ -20,3 +20,13 @@ The `-l` option is the same as the `--datadir` option in freqtrade, in case you 
 Example:
 
 `buy_reasons.py -c my_config.json -s DoNothingStrategy -t 20211001- -g0,1,2`
+
+You can specify `--enter_reason_list` and `--exit_reason_list` to only print out specific `enter_tag`s and `exit_tag`s:
+
+`buy_reasons.py -c my_config.json -s DoNothingStrategy -t 20211001- -g0,1,2 --enter_reason_list "enter_tag_1,enter_tag_2" --exit_reason_list "exit_tag_1,stop_loss"`
+
+You can also specify any indicators that you wish to see the values for that were on the enter signal candle using `--indicator_list`:
+
+`buy_reasons.py -c my_config.json -s DoNothingStrategy -t 20211001- -g0,1,2 --enter_reason_list "enter_tag_1,enter_tag_2" --exit_reason_list "exit_tag_1,stop_loss" --indicator_list "open,close,rsi,macd,profit_abs"`
+
+Note, the indicators have to exist in your main DataFrame otherwise they will simply be ignored in the tabular output.
