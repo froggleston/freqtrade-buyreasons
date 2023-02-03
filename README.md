@@ -1,4 +1,6 @@
-# freqtrade-buyreasons
+**This functionality is now included in the main Freqtrade codebase as the `backtesting-analysis` [command](https://www.freqtrade.io/en/latest/advanced-backtesting/)** 
+
+# freqtrade-buyreasons [no longer updated]
 A script to parse and display buy_tag and sell_reason for freqtrade backtesting trades
 
 You will end up with tables that look like the following, with various group options for pair, buy_tag, sell_reason, and if specified, indicator values for the buy signal candle based on chosen dataframe columns:
